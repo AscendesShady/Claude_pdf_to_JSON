@@ -32,6 +32,7 @@ class GenerationStats:
     examples_generated: int = 0
     qc_passed: int = 0
     qc_rejected: int = 0
+    tokens_used: int = 0
 
 
 def _insufficient(answer: str) -> bool:
@@ -39,13 +40,17 @@ def _insufficient(answer: str) -> bool:
     return "insufficient context" in lowered or "not enough information" in lowered
 
 
-def _generate_primary(chunk: Chunk, config: PipelineConfig, system: str) -> Optional[dict]:
+def _generate_primary(
+    chunk: Chunk, config: PipelineConfig, system: str
+) -> tuple[Optional[dict], int]:
     template = TABLE_QA_GENERATION_TEMPLATE if chunk.is_table else QA_GENERATION_TEMPLATE
     prompt = template.format(grounding_rules=GROUNDING_RULES, context=chunk.text)
     return ollama_client.generate_json(config, prompt, system)
 
 
-def _generate_paraphrase(question: str, answer: str, config: PipelineConfig, system: str) -> Optional[dict]:
+def _generate_paraphrase(
+    question: str, answer: str, config: PipelineConfig, system: str
+) -> tuple[Optional[dict], int]:
     prompt = PARAPHRASE_TEMPLATE.format(grounding_rules=GROUNDING_RULES, question=question, answer=answer)
     return ollama_client.generate_json(config, prompt, system)
 
@@ -77,7 +82,8 @@ def build_records(
             break
 
         system = SYSTEM_PROMPT_VARIANTS[i % len(SYSTEM_PROMPT_VARIANTS)]
-        result = _generate_primary(chunk, config, system)
+        result, tokens = _generate_primary(chunk, config, system)
+        stats.tokens_used += tokens
 
         question = ""
         answer = ""
@@ -101,7 +107,8 @@ def build_records(
             for _ in range(config.variants_per_chunk):
                 if stop_event is not None and stop_event.is_set():
                     break
-                variant = _generate_paraphrase(question, answer, config, system)
+                variant, variant_tokens = _generate_paraphrase(question, answer, config, system)
+                stats.tokens_used += variant_tokens
                 if not variant:
                     continue
                 v_question = str(variant.get("question", "")).strip()
@@ -122,10 +129,11 @@ def build_records(
                 examples_generated=stats.examples_generated,
                 qc_passed=stats.qc_passed,
                 qc_rejected=stats.qc_rejected,
+                tokens_used=stats.tokens_used,
             ))
 
     logger.info(
-        "Generated %d candidate records from %d chunks: %d passed QC, %d rejected",
-        stats.examples_generated, total, stats.qc_passed, stats.qc_rejected,
+        "Generated %d candidate records from %d chunks: %d passed QC, %d rejected, %d tokens used",
+        stats.examples_generated, total, stats.qc_passed, stats.qc_rejected, stats.tokens_used,
     )
     return validated, stats

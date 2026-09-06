@@ -30,7 +30,8 @@ def list_models(host: str) -> list[str]:
         return []
 
 
-def _call(config: PipelineConfig, prompt: str, system: str) -> str:
+def _call(config: PipelineConfig, prompt: str, system: str) -> tuple[str, int]:
+    """Returns (response_text, tokens_consumed) - Ollama reports prompt/completion counts."""
     payload = {
         "model": config.model_name,
         "prompt": prompt,
@@ -46,15 +47,23 @@ def _call(config: PipelineConfig, prompt: str, system: str) -> str:
         f"{config.ollama_host}/api/generate", json=payload, timeout=config.request_timeout_s
     )
     resp.raise_for_status()
-    return resp.json().get("response", "")
+    data = resp.json()
+    tokens = (data.get("prompt_eval_count") or 0) + (data.get("eval_count") or 0)
+    return data.get("response", ""), tokens
 
 
-def generate_json(config: PipelineConfig, prompt: str, system: str) -> dict | None:
-    """Call Ollama expecting a JSON object back; retries once with a correction nudge."""
+def generate_json(config: PipelineConfig, prompt: str, system: str) -> tuple[dict | None, int]:
+    """Call Ollama expecting a JSON object back; retries once with a correction nudge.
+
+    Returns (parsed_object_or_None, tokens_consumed). Tokens accumulate across retries,
+    since a failed attempt still costs real inference.
+    """
     last_raw = ""
+    tokens_used = 0
     for attempt in range(2):
         try:
-            last_raw = _call(config, prompt, system)
+            last_raw, tokens = _call(config, prompt, system)
+            tokens_used += tokens
         except requests.RequestException as exc:
             logger.warning("Ollama request failed (attempt %d/2): %s", attempt + 1, exc)
             continue
@@ -71,8 +80,8 @@ def generate_json(config: PipelineConfig, prompt: str, system: str) -> dict | No
             continue
 
         if isinstance(parsed, dict):
-            return parsed
+            return parsed, tokens_used
         logger.debug("Model returned valid JSON but not an object (attempt %d/2): %r", attempt + 1, last_raw[:200])
 
     logger.warning("Giving up on this generation after 2 failed attempts")
-    return None
+    return None, tokens_used

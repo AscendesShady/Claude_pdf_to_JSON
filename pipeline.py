@@ -11,6 +11,7 @@ import dataset_builder
 import excel_writer
 import jsonl_writer
 import pdf_extractor
+import run_output
 import splitter
 import text_chunker
 from config import PipelineConfig
@@ -28,6 +29,7 @@ class PipelineResult:
     total_examples_generated: int
     total_qc_passed: int
     total_qc_rejected: int
+    total_tokens_used: int
     split_counts: dict[str, int]
     output_dir: str
     review_workbook_path: str
@@ -40,6 +42,7 @@ def run_pipeline(
     stop_event: Optional[threading.Event] = None,
 ) -> PipelineResult:
     stop_event = stop_event or threading.Event()
+    run_dir = run_output.create_run_dir(config.output_dir, pdf_paths)
 
     def emit(**kwargs) -> None:
         if progress_cb:
@@ -81,16 +84,28 @@ def run_pipeline(
         all_chunks, config, progress_cb=_gen_progress, stop_event=stop_event
     )
     splits = splitter.split_records(validated, config)
-    counts = jsonl_writer.write_jsonl_outputs(splits, config.output_dir)
-    review_path = excel_writer.write_review_workbook(splits, config.output_dir)
+    counts = jsonl_writer.write_jsonl_outputs(splits, str(run_dir))
+    review_path = excel_writer.write_review_workbook(splits, str(run_dir))
 
-    return PipelineResult(
+    result = PipelineResult(
         total_pages=pages_done,
         total_chunks=len(all_chunks),
         total_examples_generated=stats.examples_generated,
         total_qc_passed=stats.qc_passed,
         total_qc_rejected=stats.qc_rejected,
+        total_tokens_used=stats.tokens_used,
         split_counts=counts,
-        output_dir=config.output_dir,
+        output_dir=str(run_dir),
         review_workbook_path=review_path,
     )
+
+    run_output.write_run_info(run_dir, config, pdf_paths, {
+        "pages": result.total_pages,
+        "chunks": result.total_chunks,
+        "examples_generated": result.total_examples_generated,
+        "qc_passed": result.total_qc_passed,
+        "qc_rejected": result.total_qc_rejected,
+        "tokens_used": result.total_tokens_used,
+        "split_counts": result.split_counts,
+    })
+    return result

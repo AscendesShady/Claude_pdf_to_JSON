@@ -12,10 +12,13 @@ from tkinter import filedialog, messagebox, ttk
 
 import sv_ttk
 
+import gpu_monitor
 import ollama_client
 import pipeline
 from config import AVAILABLE_MODELS_FALLBACK, PipelineConfig
 from progress import ProgressEvent
+
+GPU_POLL_INTERVAL_S = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +68,29 @@ class App(tk.Tk):
         self.last_result: "pipeline.PipelineResult | None" = None
         self.ollama_host = PipelineConfig().ollama_host
 
+        self._gpu_stop = threading.Event()
+
         self._build_widgets()
         self._populate_models()
+        self._start_gpu_monitor()
         self.after(100, self._poll_queue)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _start_gpu_monitor(self) -> None:
+        """Poll VRAM on its own thread so the reading stays live regardless of what the
+        pipeline is doing (a single chunk can take a minute on a large model)."""
+        self.tile_vram.set("...")
+
+        def worker() -> None:
+            while not self._gpu_stop.is_set():
+                self.msg_queue.put(("gpu", gpu_monitor.read_vram()))
+                self._gpu_stop.wait(GPU_POLL_INTERVAL_S)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_close(self) -> None:
+        self._gpu_stop.set()
+        self.destroy()
 
     # ---------- UI construction ----------
 
@@ -160,7 +183,7 @@ class App(tk.Tk):
         ttk.Entry(ratio_frame, textvariable=self.test_ratio_var, width=5).pack(side="left", padx=2)
         r += 1
 
-        ttk.Label(cfg_frame, text="Output folder:").grid(row=r, column=0, sticky="w", padx=5, pady=3)
+        ttk.Label(cfg_frame, text="Output root:").grid(row=r, column=0, sticky="w", padx=5, pady=3)
         self.output_dir_var = tk.StringVar(value=str(Path.cwd() / "output"))
         ttk.Entry(cfg_frame, textvariable=self.output_dir_var).grid(
             row=r, column=1, columnspan=2, sticky="ew", padx=5, pady=3
@@ -188,17 +211,24 @@ class App(tk.Tk):
         stats_frame = ttk.LabelFrame(self, text="Live Progress")
         stats_frame.pack(fill="x", padx=10, pady=5)
 
-        tiles_row = ttk.Frame(stats_frame)
-        tiles_row.pack(fill="x", padx=5, pady=5)
-        self.tile_pages = StatTile(tiles_row, "Pages Processed")
-        self.tile_chunks = StatTile(tiles_row, "Chunks Created")
-        self.tile_examples = StatTile(tiles_row, "Examples Generated")
-        self.tile_qc_passed = StatTile(tiles_row, "QC Passed", value_color="#3fb950")
-        self.tile_qc_rejected = StatTile(tiles_row, "QC Rejected", value_color="#f85149")
-        self.tile_elapsed = StatTile(tiles_row, "Elapsed")
+        # Two rows of four - eight tiles on one row gets cramped at narrow window widths.
+        tiles_row1 = ttk.Frame(stats_frame)
+        tiles_row1.pack(fill="x", padx=5, pady=(5, 2))
+        self.tile_pages = StatTile(tiles_row1, "Pages Processed")
+        self.tile_chunks = StatTile(tiles_row1, "Chunks Created")
+        self.tile_examples = StatTile(tiles_row1, "Examples Generated")
+        self.tile_elapsed = StatTile(tiles_row1, "Elapsed")
+
+        tiles_row2 = ttk.Frame(stats_frame)
+        tiles_row2.pack(fill="x", padx=5, pady=(2, 5))
+        self.tile_qc_passed = StatTile(tiles_row2, "QC Passed", value_color="#3fb950")
+        self.tile_qc_rejected = StatTile(tiles_row2, "QC Rejected", value_color="#f85149")
+        self.tile_tokens = StatTile(tiles_row2, "Tokens Used")
+        self.tile_vram = StatTile(tiles_row2, "VRAM Used")
+
         for tile in (
-            self.tile_pages, self.tile_chunks, self.tile_examples,
-            self.tile_qc_passed, self.tile_qc_rejected, self.tile_elapsed,
+            self.tile_pages, self.tile_chunks, self.tile_examples, self.tile_elapsed,
+            self.tile_qc_passed, self.tile_qc_rejected, self.tile_tokens, self.tile_vram,
         ):
             tile.pack(side="left", fill="both", expand=True, padx=4)
 
@@ -279,9 +309,10 @@ class App(tk.Tk):
         )
 
     def _reset_dashboard(self) -> None:
+        # tile_vram is deliberately excluded - it shows live system state, not run progress.
         for tile in (
-            self.tile_pages, self.tile_chunks, self.tile_examples,
-            self.tile_qc_passed, self.tile_qc_rejected, self.tile_elapsed,
+            self.tile_pages, self.tile_chunks, self.tile_examples, self.tile_elapsed,
+            self.tile_qc_passed, self.tile_qc_rejected, self.tile_tokens,
         ):
             tile.set(0)
         self.stage_var.set("Starting...")
@@ -358,6 +389,8 @@ class App(tk.Tk):
                     self._append_log(item[1])
                 elif kind == "progress":
                     self._apply_progress(item[1])
+                elif kind == "gpu":
+                    self._apply_gpu(item[1])
                 elif kind == "done":
                     self._on_finished(item[1])
                 elif kind == "error":
@@ -379,9 +412,17 @@ class App(tk.Tk):
         self.tile_examples.set(event.examples_generated)
         self.tile_qc_passed.set(event.qc_passed)
         self.tile_qc_rejected.set(event.qc_rejected)
+        self.tile_tokens.set(f"{event.tokens_used:,}")
         if event.total:
             self.progress["maximum"] = event.total
             self.progress["value"] = event.done
+
+    def _apply_gpu(self, reading: tuple[float, float] | None) -> None:
+        if reading is None:
+            self.tile_vram.set("n/a")
+            return
+        used_mb, total_mb = reading
+        self.tile_vram.set(f"{used_mb / 1024:.1f} / {total_mb / 1024:.1f} GB")
 
     def _append_log(self, msg: str) -> None:
         self.log_text.configure(state="normal")
@@ -416,8 +457,9 @@ class App(tk.Tk):
             f"Examples generated: {result.total_examples_generated}\n"
             f"QC passed: {result.total_qc_passed}\n"
             f"QC rejected: {result.total_qc_rejected}\n"
+            f"Tokens used: {result.total_tokens_used:,}\n"
             f"Split counts: {result.split_counts}\n\n"
-            f"Output folder: {result.output_dir}\n"
+            f"Run folder: {result.output_dir}\n"
             f"Review workbook: {Path(result.review_workbook_path).name}\n\n"
             f"Open the review workbook to mark Keep/Reject/Needs Fix on each generated "
             f"pair before trusting the JSONL for training."

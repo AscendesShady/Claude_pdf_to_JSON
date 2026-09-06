@@ -14,5 +14,6 @@ class ProgressEvent:
     examples_generated: int = 0
     qc_passed: int = 0
     qc_rejected: int = 0
+    tokens_used: int = 0
     done: int = 0
     total: int = 0

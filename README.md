@@ -36,23 +36,29 @@ never overwrites an earlier dataset:
 
 ```
 output/
-  20260906_143205_HCM2016/          <- one run, one folder
-    train_chatml.jsonl              train/val/test x chatml/alpaca
+  20260906_143205_HCM2016_gemma4_12b/       <- one run: when, which book, which model
+    train_chatml.jsonl                      train/val/test x chatml/alpaca
     train_alpaca.jsonl
     val_chatml.jsonl
     val_alpaca.jsonl
     test_chatml.jsonl
     test_alpaca.jsonl
-    review.xlsx                     manual Keep/Reject review sheet
-    run_info.json                   model + chunking settings and totals for this run
-  20260906_165512_HCM2016_plus2/    <- a 3-PDF run
+    review.xlsx                             manual Keep/Reject review sheet
+    run_info.json                           model + chunking settings and totals
+  20260906_161122_HCM2016_llama3.1_8b/      <- same book, different model
+    ...
+  20260906_165512_HCM2016_plus2_gemma4_12b/ <- a 3-PDF run
     ...
 ```
 
-A run covering several PDFs is labelled after the first book plus a count
-(`HCM2016_plus2`). Keep each run's split files together: train/val/test are only
-coherent within one run, since the document-level split that prevents leakage is
-computed per run.
+Folder names are `<timestamp>_<book>_<model>`, so running the same book through several
+models gives you directly comparable, clearly-labelled folders. A run covering several
+PDFs is labelled after the first book plus a count (`HCM2016_plus2`). Model tags are
+sanitized for the filesystem (`gemma4:12b` becomes `gemma4_12b`), and the exact original
+tag is preserved in `run_info.json`.
+
+Keep each run's split files together: train/val/test are only coherent within one run,
+since the document-level split that prevents leakage is computed per run.
 
 ## Notes
 

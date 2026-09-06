@@ -42,7 +42,7 @@ def run_pipeline(
     stop_event: Optional[threading.Event] = None,
 ) -> PipelineResult:
     stop_event = stop_event or threading.Event()
-    run_dir = run_output.create_run_dir(config.output_dir, pdf_paths)
+    run_dir = run_output.create_run_dir(config.output_dir, pdf_paths, config.model_name)
 
     def emit(**kwargs) -> None:
         if progress_cb:

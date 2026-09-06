@@ -19,31 +19,33 @@ from config import PipelineConfig
 logger = logging.getLogger(__name__)
 
 _INVALID_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_MAX_LABEL_CHARS = 40
+_MAX_BOOK_CHARS = 40
+_MAX_MODEL_CHARS = 24
 
 
-def _sanitize(name: str) -> str:
+def _sanitize(name: str, max_chars: int) -> str:
+    # Model tags like "gemma4:12b" carry a colon, which is illegal in Windows paths.
     cleaned = _INVALID_CHARS_RE.sub("_", name)
     cleaned = re.sub(r"\s+", "_", cleaned)
     cleaned = re.sub(r"_{2,}", "_", cleaned).strip("._")
-    return cleaned[:_MAX_LABEL_CHARS] or "run"
+    return cleaned[:max_chars] or "run"
 
 
-def build_run_label(pdf_paths: list[str]) -> str:
-    """First book's name, plus a count when the run covers several PDFs."""
+def build_run_label(pdf_paths: list[str], model_name: str) -> str:
+    """First book's name (plus a count for multi-PDF runs), then the model that generated it."""
     stems = [Path(p).stem for p in pdf_paths if str(p).strip()]
-    if not stems:
-        return "run"
-    label = _sanitize(stems[0])
+    label = _sanitize(stems[0], _MAX_BOOK_CHARS) if stems else "run"
     if len(stems) > 1:
         label = f"{label}_plus{len(stems) - 1}"
-    return label
+
+    model_label = _sanitize(model_name, _MAX_MODEL_CHARS) if model_name else ""
+    return f"{label}_{model_label}" if model_label else label
 
 
-def create_run_dir(output_root: str, pdf_paths: list[str]) -> Path:
+def create_run_dir(output_root: str, pdf_paths: list[str], model_name: str) -> Path:
     """Create (and return) a fresh, non-colliding folder for this run's outputs."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = Path(output_root) / f"{timestamp}_{build_run_label(pdf_paths)}"
+    base = Path(output_root) / f"{timestamp}_{build_run_label(pdf_paths, model_name)}"
 
     # Same-second collisions are near-impossible, but never silently reuse a folder -
     # not overwriting previous results is the entire point of this module.

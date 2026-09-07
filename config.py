@@ -31,6 +31,10 @@ class PipelineConfig:
     # --- Quality gate ---
     max_seq_tokens: int = 2048  # records whose rendered prompt+answer exceed this are discarded
     length_ratio_limit: float = 3.0  # discard if output/input token ratio deviates beyond this
+    min_answer_tokens: int = 12  # below this an answer is a fragment, not a usable response
+    # Strip/reject questions that refer to "the context/passage/document" - at inference time
+    # there is no passage, so training on them teaches the model to expect one.
+    strip_meta_questions: bool = True
 
     # --- Split ---
     train_ratio: float = 0.8

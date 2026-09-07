@@ -31,18 +31,49 @@ class ValidatedRecord(BaseModel):
         return v.strip()
 
 
+# Questions that point at "the context/passage/document" teach the model to expect a passage
+# that will not exist at inference time. Compiled once; word boundaries keep legitimate
+# vocabulary like "textbook", "contextual" and "documentation" intact.
+_META_PREAMBLE_RE = re.compile(
+    r"^\s*(?:according to|as (?:stated|described|mentioned|shown) in|based on|per|from)\s+"
+    r"(?:the\s+)?(?:context|text|passage|document|snapshot|excerpt)(?:\s+above)?\s*[,:]?\s*",
+    re.IGNORECASE,
+)
+_META_WORD_RE = re.compile(
+    r"\b(?:context|text|passage|document|snapshot|excerpt)\b", re.IGNORECASE
+)
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", text.lower()).strip()
+
+
+def _strip_meta_preamble(question: str) -> str:
+    """Drop a leading 'According to the context,' style preamble and re-capitalize."""
+    stripped = _META_PREAMBLE_RE.sub("", question, count=1)
+    if stripped and stripped != question:
+        stripped = stripped[0].upper() + stripped[1:]
+    return stripped
 
 
 def validate_one(
     rec: RawRecord, config: PipelineConfig, seen_pairs: set[tuple[str, str]]
 ) -> tuple[ValidatedRecord | None, str | None]:
     """Validate a single record. Returns (record, None) on success or (None, reason) on rejection."""
+    # Cheapest gate first - it rejects the most rows. The stripped question is what gets
+    # validated and stored, so dedup below keys off it and a stripped/unstripped pair collides.
+    question = rec.question
+    if config.strip_meta_questions:
+        question = _strip_meta_preamble(question)
+        if question != rec.question and len(question.split()) < 4:
+            return None, "question too short after meta strip"
+        if _META_WORD_RE.search(question):
+            return None, "meta-referential question"
+
     try:
         v = ValidatedRecord(
             system=rec.system,
-            question=rec.question,
+            question=question,
             answer=rec.answer,
             source_doc=rec.source_doc,
             page_start=rec.page_start,
@@ -63,8 +94,8 @@ def validate_one(
         return None, "duplicate question/answer pair"
 
     answer_tokens = count_tokens(v.answer)
-    if answer_tokens < 3:
-        return None, "answer too short"
+    if answer_tokens < config.min_answer_tokens:
+        return None, f"answer too short ({answer_tokens} < {config.min_answer_tokens})"
     if rec.chunk_token_count and answer_tokens > rec.chunk_token_count * config.length_ratio_limit:
         return None, "answer implausibly long vs source chunk"
 
